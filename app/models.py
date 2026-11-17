@@ -5,12 +5,15 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+# Revisions are unsigned 64-bit integers: 1 .. 2**64 - 1.
+UINT64_MAX = 18446744073709551615
+
 
 class FragmentIn(BaseModel):
     station: str = Field(min_length=1, max_length=64)
     minute_utc: datetime
     fragment_no: int = Field(ge=0, le=9999)
-    revision: int = Field(ge=1)
+    revision: int = Field(ge=1, le=UINT64_MAX)
     start_sample: int = Field(ge=0, le=59)
     samples: list[int] = Field(min_length=1, max_length=60)
 

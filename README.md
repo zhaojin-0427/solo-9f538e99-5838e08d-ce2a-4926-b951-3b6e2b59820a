@@ -37,16 +37,24 @@ WAVEFORM_DB_PATH=./data/waveform.db uvicorn app.main:app --reload
 | `station` | 非空字符串，台站代码 |
 | `minute_utc` | 整分钟 UTC 时间（秒必须为 0），如 `2026-11-17T05:06:00Z` |
 | `fragment_no` | 片段号，非负整数 |
-| `revision` | 修订号，**正整数** |
+| `revision` | 修订号，**无符号 64 位正整数**，范围 `1 ~ 18446744073709551615`（含 `2^63`） |
 | `start_sample` | 起始采样位，0–59 |
 | `samples` | 非空整数数组；`start_sample + len(samples) ≤ 60`，越界拒绝（422） |
 
 修订与重传规则（同一 `station + minute_utc + fragment_no`）：
 
+- 新旧版一律按 **数值大小** 判断（不是字符串字典序，也不是浮点）；
+  相邻大号如 `9223372036854775808` 与 `9223372036854775809` 不会被合并
 - 修订号 **更高** → 接受并覆盖旧版（`status: "superseded"`）
 - 修订号 **更低** → 拒绝（409），旧数据不动
 - 同修订号、**同内容**（SHA-256 一致）→ 幂等重传，沿用原结果（`status: "unchanged"`），不产生新行
 - 同修订号、**异文** → 拒绝（409），旧数据不动
+
+> 存储说明：SQLite 只支持有符号 64 位整数，无法直接绑定 `2^63` 及以上的值。
+> 修订号在库内以规范十进制 **TEXT** 落库（带 CHECK 约束兜底），
+> 应用层读出后转回 Python `int` 做全部比较，因此完整覆盖无符号 64 位区间且不会精度丢失。
+> 旧版本创建的数据库（修订号为 INTEGER 列）在**启动时自动迁移**：三张表按依赖顺序重建，
+> 历史片段与发布记录全部保留，旧发布的来源修订号与冻结波形不变。
 
 拼装（assembly）：
 
@@ -102,8 +110,8 @@ curl -s -X POST "localhost:8000/publications?station=STA1&minute_utc=$MIN"
 
 ```bash
 pip install pytest httpx
-python -m pytest tests/ -v          # 22 个用例：校验/修订/拼装/发布/过期/重启/并发
-python scripts/smoke.py             # 对运行中的服务做 32 项端到端检查
+python -m pytest tests/ -v          # 30 个用例：校验/修订（含 uint64 大号与旧库迁移）/拼装/发布/过期/重启/并发
+python scripts/smoke.py             # 对运行中的服务做 44 项端到端检查（需干净数据库，脚本本身非幂等）
 ```
 
 并发用例会启动真实 uvicorn 进程，用 6 个线程同时上传并尝试发布，

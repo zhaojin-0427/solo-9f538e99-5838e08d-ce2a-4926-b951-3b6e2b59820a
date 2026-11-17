@@ -63,6 +63,16 @@ def load_samples(raw: str) -> list[int]:
     return json.loads(raw)
 
 
+def encode_revision(revision: int) -> str:
+    """Canonical decimal text for SQLite storage (supports full uint64)."""
+    return str(revision)
+
+
+def decode_revision(raw: str | int) -> int:
+    """Numeric revision from storage; comparisons always use this int value."""
+    return int(raw)
+
+
 def content_hash(start_sample: int, samples: list[int]) -> str:
     payload = json.dumps(
         {"start_sample": start_sample, "samples": samples}, separators=(",", ":")
@@ -75,7 +85,7 @@ def _fragment_set_hash(rows: list[sqlite3.Row]) -> str:
     canonical = [
         {
             "fragment_no": r["fragment_no"],
-            "revision": r["revision"],
+            "revision": decode_revision(r["revision"]),
             "start_sample": r["start_sample"],
             "samples": load_samples(r["samples"]),
             "content_hash": r["content_hash"],
@@ -96,7 +106,7 @@ def _row_to_fragment(r: sqlite3.Row) -> dict[str, Any]:
         "station": r["station"],
         "minute_utc": _parse_minute(r["minute_utc"]),
         "fragment_no": r["fragment_no"],
-        "revision": r["revision"],
+        "revision": decode_revision(r["revision"]),
         "start_sample": r["start_sample"],
         "samples": load_samples(r["samples"]),
         "content_hash": r["content_hash"],
@@ -184,13 +194,17 @@ def upload_fragment(payload: dict[str, Any]) -> dict[str, Any]:
 
             changed = False
             if existing is not None:
-                if revision < existing["revision"]:
+                # Numeric comparison on Python ints — never lexicographic text,
+                # so adjacent large revisions (e.g. 2**63, 2**63 + 1) stay
+                # distinct and order correctly.
+                existing_revision = decode_revision(existing["revision"])
+                if revision < existing_revision:
                     raise StaleRevisionError(
                         f"fragment_no={fragment_no} already at revision "
-                        f"{existing['revision']}; incoming revision {revision} "
+                        f"{existing_revision}; incoming revision {revision} "
                         "is not higher"
                     )
-                if revision == existing["revision"]:
+                if revision == existing_revision:
                     # Same version: identical content is an idempotent retry and
                     # must return the original result; different content is refused.
                     if existing["content_hash"] == new_hash:
@@ -206,7 +220,13 @@ def upload_fragment(payload: dict[str, Any]) -> dict[str, Any]:
                 conn.execute(
                     "UPDATE fragments SET revision = ?, start_sample = ?, "
                     "samples = ?, content_hash = ? WHERE id = ?",
-                    (revision, start_sample, samples_json, new_hash, existing["id"]),
+                    (
+                        encode_revision(revision),
+                        start_sample,
+                        samples_json,
+                        new_hash,
+                        existing["id"],
+                    ),
                 )
                 changed = True
             else:
@@ -218,7 +238,7 @@ def upload_fragment(payload: dict[str, Any]) -> dict[str, Any]:
                         station,
                         minute,
                         fragment_no,
-                        revision,
+                        encode_revision(revision),
                         start_sample,
                         samples_json,
                         new_hash,
@@ -301,7 +321,7 @@ def _hydrate_publication(conn: sqlite3.Row, pub: sqlite3.Row) -> dict[str, Any]:
         "items": [
             {
                 "fragment_no": it["fragment_no"],
-                "revision": it["revision"],
+                "revision": decode_revision(it["revision"]),
                 "start_sample": it["start_sample"],
                 "samples": load_samples(it["samples"]),
                 "content_hash": it["content_hash"],

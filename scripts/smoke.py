@@ -129,6 +129,58 @@ def main() -> int:
                  params={"station": "NOPE", "minute_utc": MIN})
     check("unknown publication 404", r.status_code == 404)
 
+    # 13. Unsigned 64-bit revision numbers (regression: 2**63 used to 500).
+    BIG = "BIG"
+    rev_2p63 = 9223372036854775808          # 2**63, the reported failing value
+    rev_next = 9223372036854775809          # adjacent large revision
+    uint64_max = 18446744073709551615       # 2**64 - 1
+    wave_b = list(range(60))
+    r = http.post("/fragments",
+                  json=frag(1, rev_2p63, 0, wave_b[:30], station=BIG))
+    check("2**63 revision accepted (no 500)",
+          r.status_code == 201 and r.json()["revision"] == rev_2p63)
+    r = http.post("/fragments",
+                  json=frag(2, rev_2p63, 30, wave_b[30:], station=BIG))
+    check("second 2**63 fragment accepted", r.status_code == 201)
+
+    # adjacent large revisions stay distinct: REAL storage would merge them
+    r = http.post("/fragments",
+                  json=frag(1, rev_next, 0, [42] + wave_b[1:30], station=BIG))
+    check("adjacent large revision supersedes",
+          r.status_code == 201 and r.json()["status"] == "superseded"
+          and r.json()["revision"] == rev_next)
+    r = http.post("/fragments",
+                  json=frag(1, rev_2p63, 0, [7] + wave_b[1:30], station=BIG))
+    check("numerically smaller large revision rejected", r.status_code == 409)
+
+    # same-version retransmission semantics still hold at large revisions
+    r = http.post("/fragments",
+                  json=frag(1, rev_next, 0, [42] + wave_b[1:30], station=BIG))
+    check("large revision same-content retry idempotent",
+          r.status_code == 201 and r.json()["status"] == "unchanged")
+    r = http.post("/fragments",
+                  json=frag(1, rev_next, 0, [43] + wave_b[1:30], station=BIG))
+    check("large revision different-content rejected", r.status_code == 409)
+
+    # upper boundary of the unsigned 64-bit range is accepted
+    r = http.post("/fragments",
+                  json=frag(2, uint64_max, 30, wave_b[30:], station=BIG))
+    check("uint64 max revision accepted",
+          r.status_code == 201 and r.json()["revision"] == uint64_max)
+    r = http.post("/fragments",
+                  json=frag(2, uint64_max + 1, 30, wave_b[30:], station=BIG))
+    check("uint64 max + 1 rejected at validation", r.status_code == 422)
+
+    # publish the corrected large-revision set; correction freezes correctly
+    r = http.post("/publications", params={"station": BIG, "minute_utc": MIN})
+    check("large-revision minute publishes", r.status_code == 201)
+    big_pub = r.json()
+    check("published wave reflects correction",
+          big_pub["wave"] == [42] + wave_b[1:])
+    check("large source revisions pinned",
+          {i["revision"] for i in big_pub["items"]} == {rev_next, uint64_max})
+    check("large-revision publication fresh", big_pub["stale"] is False)
+
     print()
     if failures:
         print(f"{len(failures)} FAILURE(S): {failures}")
